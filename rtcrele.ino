@@ -106,6 +106,9 @@ void loop ()
     }else{
       lig = false;
     }
+    if(now.Hour() == 22 || now.Hour() == 00){
+        blig = false;
+    }
     if(!btpause){
       if( lig || blig){
         digitalWrite(RelePin, HIGH);
