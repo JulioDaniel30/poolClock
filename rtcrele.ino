@@ -115,6 +115,8 @@ void loop ()
       }else{
         digitalWrite(RelePin, LOW);
       }
+    }else{
+        digitalWrite(RelePin, LOW);
     }
 
     if (!now.IsValid())
