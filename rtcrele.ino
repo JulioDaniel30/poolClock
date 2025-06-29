@@ -1,108 +1,132 @@
 #include <RtcDS1302.h>
 
-// Pinos
-const int RelePin = 13;
-const int btPIn = 12;  // Interruptor
-const int ledBLig = 10;
+// --- PINOS ---
+const int pinoRele = 13;
+const int pinoInterruptor = 12; // Interruptor manual
+const int pinoLedManual = 10;
 
-// Estado
-bool lig = false;
-bool blig = false;
+// --- ESTADOS ---
+bool horarioAutomaticoAtivo = false;
+bool acionamentoManualAtivo = false;
 bool ignorarInterruptor = false;
-bool estadoAnteriorInterruptor = HIGH;
 
-// Horários
-int hlig = 7;
-int hdes = 17;
+// --- CONTROLE DO INTERRUPTOR (DEBOUNCE) ---
+bool estadoAtualInterruptor = HIGH;
+bool ultimoEstadoInterruptor = HIGH;
+unsigned long ultimaVerificacaoDebounce = 0;
+const long delayDebounce = 50; // 50 milissegundos
 
-// RTC
+// --- HORÁRIOS ---
+const int horaLigar = 7;
+const int horaDesligar = 17;
+const int horasCriticas[] = {17, 22, 0}; // Horas para desligamento forçado
+
+// --- RTC ---
 ThreeWire myWire(4, 5, 3); // IO, SCLK, CE
 RtcDS1302<ThreeWire> Rtc(myWire);
 
 void setup() {
   Serial.begin(57600);
-  pinMode(RelePin, OUTPUT);
-  pinMode(ledBLig, OUTPUT);
-  pinMode(btPIn, INPUT_PULLUP);  // Interruptor com GND
+  pinMode(pinoRele, OUTPUT);
+  pinMode(pinoLedManual, OUTPUT);
+  pinMode(pinoInterruptor, INPUT_PULLUP); // Interruptor com GND
 
-  digitalWrite(RelePin, LOW);
+  digitalWrite(pinoRele, LOW);
   Rtc.Begin();
 
+  // Configuração inicial do RTC (só na primeira vez ou se a bateria falhar)
   RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
-  if (!Rtc.IsDateTimeValid()) Rtc.SetDateTime(compiled);
+  if (!Rtc.IsDateTimeValid()) {
+    Serial.println("RTC não configurado! Configurando com a hora da compilação.");
+    Rtc.SetDateTime(compiled);
+  }
   if (Rtc.GetIsWriteProtected()) Rtc.SetIsWriteProtected(false);
   if (!Rtc.GetIsRunning()) Rtc.SetIsRunning(true);
-  if (Rtc.GetDateTime() < compiled) Rtc.SetDateTime(compiled);
 
-  Serial.println("Sistema iniciado");
+  Serial.println("Sistema iniciado.");
 }
 
 void loop() {
-  RtcDateTime now = Rtc.GetDateTime();
-  if (!now.IsValid()) {
-    Serial.println("Erro no RTC.");
+  RtcDateTime agora = Rtc.GetDateTime();
+  if (!agora.IsValid()) {
+    Serial.println("Erro na leitura do RTC. Verifique a bateria e as conexões.");
+    delay(5000); // Espera antes de tentar novamente para não poluir o Serial
     return;
   }
 
-  // Log da hora
-  Serial.print("Hora atual: ");
-  printDateTime(now);
-  Serial.println();
+  // --- LÓGICA DO INTERRUPTOR MANUAL COM DEBOUNCE ---
+  bool leituraInterruptor = digitalRead(pinoInterruptor);
 
-  bool estadoAtualInterruptor = digitalRead(btPIn);
+  // Verifica se o estado do interruptor mudou
+  if (leituraInterruptor != ultimoEstadoInterruptor) {
+    ultimaVerificacaoDebounce = millis();
+  }
 
-  // Se o horário for crítico, desativa manual e bloqueia reativação
-  if ((now.Hour() == 17 || now.Hour() == 22 || now.Hour() == 0)) {
-    if (blig) {
-      blig = false;
-      ignorarInterruptor = true;
-      Serial.println("blig desligado automaticamente por horário crítico.");
+  // Após um tempo de debounce, confirma a mudança de estado
+  if ((millis() - ultimaVerificacaoDebounce) > delayDebounce) {
+    // Se o estado realmente mudou, atualiza
+    if (leituraInterruptor != estadoAtualInterruptor) {
+      estadoAtualInterruptor = leituraInterruptor;
+
+      // Se o interruptor foi LIGADO (LOW) e não está bloqueado
+      if (estadoAtualInterruptor == LOW && !ignorarInterruptor) {
+        if (!acionamentoManualAtivo) {
+          acionamentoManualAtivo = true;
+          Serial.println("Acionamento manual ATIVADO.");
+        }
+      } 
+      // Se o interruptor foi DESLIGADO (HIGH)
+      else if (estadoAtualInterruptor == HIGH) {
+        if (acionamentoManualAtivo) {
+          acionamentoManualAtivo = false;
+          Serial.println("Acionamento manual DESATIVADO.");
+        }
+        // Ao desligar o interruptor, remove qualquer bloqueio existente
+        if (ignorarInterruptor) {
+          ignorarInterruptor = false;
+          Serial.println("Bloqueio do interruptor removido.");
+        }
+      }
+    }
+  }
+  ultimoEstadoInterruptor = leituraInterruptor;
+
+  // --- LÓGICA DE HORÁRIO CRÍTICO ---
+  bool ehHoraCritica = false;
+  for (int hora : horasCriticas) {
+    // Verifica se a hora é crítica E se estamos no primeiro minuto dessa hora
+    if (agora.Hour() == hora && agora.Minute() == 0) {
+      ehHoraCritica = true;
+      break;
+    }
+  }
+  
+  if (ehHoraCritica) {
+    if (acionamentoManualAtivo) {
+      acionamentoManualAtivo = false;
+      ignorarInterruptor = true; // Bloqueia até que o interruptor seja desligado
+      Serial.print("HORA CRÍTICA (");
+      Serial.print(agora.Hour());
+      Serial.println("h): Acionamento manual desligado e bloqueado.");
     }
   }
 
-  // Se o interruptor for desligado, remove o bloqueio
-  if (estadoAtualInterruptor == HIGH && estadoAnteriorInterruptor == LOW) {
-    ignorarInterruptor = false;
-    Serial.println("Interruptor foi desligado. Resetando bloqueio.");
-  }
+  // --- LÓGICA DE HORÁRIO AUTOMÁTICO ---
+  horarioAutomaticoAtivo = (agora.Hour() >= horaLigar && agora.Hour() < horaDesligar);
 
-  // Se interruptor está ligado e não está bloqueado, ativa blig
-  if (estadoAtualInterruptor == LOW && !ignorarInterruptor) {
-    if (!blig) {
-      blig = true;
-      Serial.println("blig ativado manualmente.");
-    }
-  } else if (estadoAtualInterruptor == HIGH) {
-    if (blig) {
-      blig = false;
-      Serial.println("blig desativado manualmente.");
-    }
-  }
-
-  estadoAnteriorInterruptor = estadoAtualInterruptor;
-
-  // LED indicativo
-  digitalWrite(ledBLig, blig ? HIGH : LOW);
-
-  // Lógica automática
-  lig = (now.Hour() >= hlig && now.Hour() < hdes);
-
-  // Controle do relé
-  bool estadoRele = (lig || blig);
-  digitalWrite(RelePin, estadoRele ? HIGH : LOW);
-
-  Serial.print("Relé: ");
-  Serial.println(estadoRele ? "LIGADO" : "DESLIGADO");
-  Serial.println("----------------------------");
+  // --- CONTROLE FINAL DO RELÉ ---
+  bool ligarRele = (horarioAutomaticoAtivo || acionamentoManualAtivo);
+  digitalWrite(pinoRele, ligarRele ? HIGH : LOW);
+  
+  // --- ATUALIZAÇÃO DOS INDICADORES ---
+  digitalWrite(pinoLedManual, acionamentoManualAtivo);
+  
+  // --- LOG NO SERIAL ---
+  Serial.print(agora.Hour(), DEC); Serial.print(":"); Serial.print(agora.Minute(), DEC); Serial.print(":"); Serial.println(agora.Second(), DEC);
+  Serial.print("  - Auto: "); Serial.print(horarioAutomaticoAtivo ? "LIGADO" : "DESLIGADO");
+  Serial.print(" | Manual: "); Serial.print(acionamentoManualAtivo ? "LIGADO" : "DESLIGADO");
+  Serial.print(" | Rele: "); Serial.println(ligarRele ? "LIGADO" : "DESLIGADO");
+  Serial.println("------------------------------------");
 
   delay(1000);
-}
-
-#define countof(a) (sizeof(a) / sizeof(a[0]))
-void printDateTime(const RtcDateTime& dt) {
-  char datestring[26];
-  snprintf_P(datestring, countof(datestring), PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
-             dt.Month(), dt.Day(), dt.Year(),
-             dt.Hour(), dt.Minute(), dt.Second());
-  Serial.print(datestring);
 }
